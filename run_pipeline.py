@@ -1,77 +1,77 @@
-import os
-from ast_parser import extract_code_metrics
+import re
+import joblib
+import warnings
+from multi_lang_parser import extract_features
 from patch_generator import generate_secure_patch
-import matplotlib.pyplot as plt
-import matplotlib.image as mpimg
 
-# Sample source code for testing (or AI-generated code)
-sample_code = """
-def authenticate_user():
-    password = "SuperSecretPassword123"
-    user_input = input("Enter command: ")
-    eval(user_input)
-    
-    if user_input == "admin":
-        print("Welcome admin")
-    else:
-        print("Access denied")
-"""
+warnings.filterwarnings("ignore", category=UserWarning)
 
-def show_shap_plot():
-    """Displays the SHAP Summary Plot if available."""
-    plot_path = "shap_summary.png"
-    if os.path.exists(plot_path):
-        print("\n--- OPENING EXPLAINABLE AI (SHAP) PLOT ---")
-        img = mpimg.imread(plot_path)
-        plt.figure(figsize=(10, 6))
-        plt.imshow(img)
-        plt.axis('off')
-        plt.title("SHAP Summary Plot - Vulnerability Detection")
-        plt.show()
-    else:
-        print("\n⚠️ SHAP summary plot image not found in the directory.")
+# Load the pre-trained Random Forest vulnerability classification model
+model = joblib.load("vulnerability_model.pkl")
 
-def analyze_and_patch(source_code):
-    # 1. Extract metrics using AST parser
-    metrics = extract_code_metrics(source_code)
+def scan_any_code(file_path):
+    """Run end-to-end vulnerability analysis and auto-patching matching exact model features."""
+    features = extract_features(file_path)
+    lang = features["language"].upper()
+    code = features["raw_code"]
+
+    # Calculate variable count and missing input validation across languages
+    var_matches = re.findall(r'\b(int|char|float|double|var|let|const|String)\b|=', code)
+    num_variables = max(1, len(var_matches))
     
-    # 2. Calculate risk score
-    risk_score = (
-        (metrics['unsafe_functions_count'] * 2) +
-        (metrics['missing_input_validation'] * 3) +
-        (metrics['hardcoded_credentials'] * 4) +
-        (1 if metrics['cyclomatic_complexity'] > 10 else 0)
-    )
-    
-    is_vulnerable = 1 if risk_score > 4 else 0
-    risk_probability = min(0.95, max(0.15, risk_score / 10.0))
-    
-    # 3. Print Security Report
-    print("=" * 50)
-    print("   AI-GENERATED CODE SECURITY & AUTO-REMEDIATION REPORT   ")
-    print("=" * 50)
-    print(f"Extracted Metrics: {metrics}")
-    print(f"Prediction: {'⚠️ Vulnerable / Risky' if is_vulnerable == 1 else '✅ Safe'}")
-    print(f"Risk Probability: {risk_probability*100:.2f}%")
-    
-    # 4. Generate Auto-Patch if vulnerable
-    if is_vulnerable:
-        print("\n--- GENERATING SECURE AUTO-PATCH ---")
-        patched_code, fixes = generate_secure_patch(source_code)
-        print("Applied Fixes:")
+    has_unsafe = features["unsafe_function_count"] > 0
+    has_validation = bool(re.search(r'\b(if|validate|sanitize|check|try|catch|isinstance|sizeof)\b', code))
+    missing_input_validation = 1 if (has_unsafe and not has_validation) else 0
+
+    # Exact feature mapping matching the trained Random Forest model
+    metric_map = {
+        "lines_of_code": features["lines_of_code"],
+        "cyclomatic_complexity": features["cyclomatic_complexity"],
+        "num_variables": num_variables,
+        "unsafe_functions_count": features["unsafe_function_count"],
+        "missing_input_validation": missing_input_validation,
+        "hardcoded_credentials": features["hardcoded_credentials"]
+    }
+
+    expected_cols = list(model.feature_names_in_)
+    row = [metric_map.get(col, 0) for col in expected_cols]
+    feature_vector = [row]
+
+    # Predict vulnerability status and risk probability
+    prediction = model.predict(feature_vector)[0]
+    risk_prob = model.predict_proba(feature_vector)[0][1] * 100
+
+    print(f"\n==================== Scan Report ({lang}) ====================")
+    print(f"File: {file_path}")
+    print(f"Metrics: LOC={features['lines_of_code']}, Complexity={features['cyclomatic_complexity']}, "
+          f"Unsafe Calls={features['unsafe_function_count']}, Hardcoded Secrets={features['hardcoded_credentials']}")
+    print(f"Risk Score: {risk_prob:.2f}% | Status: {'VULNERABLE' if prediction == 1 else 'SAFE'}")
+
+    # Explainability breakdown based on model feature importances
+    importances = model.feature_importances_
+    print("Model Feature Weights (Risk Drivers):")
+    for name, val, imp in zip(expected_cols, row, importances):
+        print(f" - {name} (value={val}): weight={imp:.4f}")
+
+    # Generate automated security patches if vulnerabilities are detected
+    if prediction == 1:
+        patched_code, fixes = generate_secure_patch(code, features["language"])
+        print("\nApplied Auto-Patches:")
         for fix in fixes:
-            print(f"  ✔ {fix}")
-        print("\nPatched Code Preview:")
-        print("-" * 50)
+            print(f" - {fix}")
+        print("\n--- Patched Code Preview ---")
         print(patched_code)
-        print("-" * 50)
-    else:
-        print("\n✅ Code is secure. No auto-patching required.")
-    
-    print("=" * 50)
-    
-    # 5. Show SHAP Explainability Plot
-    show_shap_plot()
+        return patched_code
+        
+    return code
 
 if __name__ == "__main__":
-    analyze_and_patch(sample_code)
+    # Create temporary sample files to test multi-language detection
+    with open("sample_test.c", "w") as f:
+        f.write('#include <stdio.h>\nint main() {\n    char buf[10];\n    char *password = "secret123";\n    gets(buf);\n    return 0;\n}')
+
+    with open("sample_test.js", "w") as f:
+        f.write('const api_key = "AIzaSy-998877";\nfunction run(userInput) {\n    document.getElementById("out").innerHTML = userInput;\n    eval(userInput);\n}')
+
+    scan_any_code("sample_test.c")
+    scan_any_code("sample_test.js")
